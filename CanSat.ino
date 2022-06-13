@@ -10,6 +10,8 @@
 #include <Adafruit_PM25AQI.h>
 #include <SparkFun_SCD30_Arduino_Library.h>
 #include <MicroNMEA.h>
+#include <TeensyThreads.h>
+#include <mpu9250.h>
 
 /* ---------------- Lora ----------------- */
 // LoRa pins
@@ -23,9 +25,10 @@ const long freq = 4339E5; // 433.9 MHz
 
 /* ----------------- GPS ------------------*/
 // Buffer to store data from gps
-char nmeaBuffer[100];
+volatile char nmeaBuffer[100];
 // GPS object
 MicroNMEA nmea(nmeaBuffer, sizeof(nmeaBuffer));
+int gps_thread;
 
 // Variables to store gps data
 float gps_latitude;
@@ -49,6 +52,13 @@ String header = "x,y,z";
 /* --------------- Sensors ---------------- */
 // Sensor power pins
 const int sensor_board_power = 22;
+
+// MPU9250
+bfs::Mpu9250 imu;
+float acc_x, acc_y, acc_z;
+float gyro_x, gyro_y, gyro_z;
+float mag_x, mag_y, mag_z;
+float temp_imu;
 
 // Mics2714 variables
 const int mics_input = 21;
@@ -121,24 +131,31 @@ uint32_t getAbsoluteHumidity(float temperature, float humidity)
   const uint32_t absoluteHumidityScaled = static_cast<uint32_t>(1000.0f * absoluteHumidity);                                                                // [mg/m^3]
   return absoluteHumidityScaled;
 }
+// Funtion for TeensyThread to collect serial data from GPS continuosly
+void read_gps_serial(){
+  while(1){
+    while(Serial1.available() > 0){
+      char c = Serial1.read();
+      nmea.process(c);
+    }
+  }
+}
 
 // Function that updates gps data
-void get_gps_data()
+void update_gps_data()
 {
-  while (Serial1.available()) {
-    char c = Serial1.read();
-    nmea.process(c);
-  }
   // Save data to variables
+  // MAYBE ADD A CHECK TO SEE IF NEW COORDINATE ISN'T INVALID
+  // LIKE 0.0 OR 99.9
+  // IN THAT CASE KEEP PREVIOUSLY SAVED COORDINATE
   gps_latitude = nmea.getLatitude() / 1000000.0;
   gps_longitude = nmea.getLongitude() / 1000000.0;
   nmea.getAltitude(_gps_altitude);
   gps_altitude = _gps_altitude / 1000.0;
-  gps_speed = nmea.getSpeed();
+  gps_speed = (nmea.getSpeed() / 1000.0) * 1.852;
   gps_hour = nmea.getHour();
   gps_minute = nmea.getMinute();
   gps_second = nmea.getSecond();
-  nmea.clear();
 }
 
 // Function that turns on and begins communication with all senors
@@ -149,35 +166,46 @@ void turn_on_all_sensors()
   delay(2000);
 
   // Begin communication with SCD30 sensor
-  while (!scd.begin(Wire1))
+  while (!scd.begin(Wire2))
   {
     delay(1000);
+    Serial.println("SCD not working");
   }
+  Serial.println("SCD working");
   // Begin communication with PMSA003I sensor
   while (!pms.begin_I2C(&Wire2))
   {
     delay(1000);
+    Serial.println("PMS not working");
   }
+  Serial.println("PMS working");
 
   // Begin communication with SGP30 sensor
   while (!sgp.begin(&Wire2))
   {
     delay(1000);
+    Serial.println("SGP not working");
   }
+  Serial.println("SGP working");
+  /*
   int e_base = 0;
   int t_base = 0;
   EEPROM.get(0, e_base);
   EEPROM.get(100, t_base);
   sgp.setIAQBaseline(e_base, t_base);
-
+  */
+  
   // Begin communication with the GPS module
   Serial1.begin(9600);
+  gps_thread = threads.addThread(read_gps_serial);
+  Serial.println("GPS working");
 }
 
 // Turns off all sensors and gps
 void turn_off_all_sensors()
 {
   digitalWrite(sensor_board_power, LOW);
+  threads.kill(gps_thread);
 }
 
 // Function that writes given message to SD card csv file
@@ -249,7 +277,6 @@ void setup()
   // Begin serial and i2c comunication.
   Serial.begin(115200);
   Wire.begin();
-  Wire1.begin();
   Wire2.begin();
 
   // Change analog resolution to 12 bits. That is from 0 to 4095
@@ -279,12 +306,14 @@ void setup()
   // THIS LINE IS PROBABLY USELESS BECAUSE WE'RE NOT RECEIVING DATA
   LoRa.enableCrc();
 
+  /*
   // See if the card is present and initialize it
   while (!SD.begin(BUILTIN_SDCARD)) {
     delay(1000);
   }
   // Create a new csv file where to save data
   create_sd_file();
+  */
   
   // Starts BMP280 sensor
   bmp.begin(BMP280_ADDRESS_ALT, BMP280_CHIPID);
@@ -295,6 +324,18 @@ void setup()
                   Adafruit_BMP280::SAMPLING_X4,   /* Pressure oversampling */
                   Adafruit_BMP280::FILTER_X2,     /* Filtering. */
                   Adafruit_BMP280::STANDBY_MS_1); /* Standby time. */
+
+  imu.Config(&Wire, bfs::Mpu9250::I2C_ADDR_PRIM);
+  /* Initialize and configure IMU */
+  if (!imu.Begin()) {
+    Serial.println("Error initializing communication with IMU");
+    while(1) {}
+  }
+  /* Set the sample rate divider */
+  if (!imu.ConfigSrd(19)) {
+    Serial.println("Error configured SRD");
+    while(1) {}
+  }
                   
   // Turn on the rest of the electronics
   turn_on_all_sensors();
@@ -309,12 +350,12 @@ void setup()
 void loop()
 {  
   // Checks if Cansat has landed
-  check_if_landed();
+  // check_if_landed();
 
   // If it is time to read and sensor board is on, get latest data available
   if (((millis() - last_sensor_reading_millis) > sensor_reading_interval) && (digitalRead(sensor_board_power) == HIGH)){
     // GPS data
-    get_gps_data();
+    update_gps_data();
 
     // SCD 30 data
     if (scd.dataAvailable()){
@@ -377,6 +418,19 @@ void loop()
       no2_ppm = 0.0;
     }
 
+    if (imu.Read()){
+      acc_x = imu.accel_x_mps2();
+      acc_y = imu.accel_y_mps2();
+      acc_z = imu.accel_z_mps2();
+      gyro_x = imu.gyro_x_radps();
+      gyro_y = imu.gyro_y_radps();
+      gyro_z = imu.gyro_z_radps();
+      mag_x = imu.mag_x_ut();
+      mag_y = imu.mag_y_ut();
+      mag_z = imu.mag_z_ut();
+      temp_imu = imu.die_temp_c();
+    }
+    
     // Save data to csv file
     String csv_row = "";
     int int_variables[] = {co2, eco2, tvoc};
@@ -399,7 +453,7 @@ void loop()
       csv_row.concat(",");
     }
     // Write a new line to csv file
-    write_to_sd(csv_row);
+    //write_to_sd(csv_row);
 
     // Set time when last readings happend
     last_sensor_reading_millis = millis();
@@ -409,8 +463,90 @@ void loop()
   if (millis() - last_radio_transmit_millis >= radio_interval)
   {
     // Sends data to LoRa radio module
+    /*
     LoRa.beginPacket();
     LoRa.endPacket();
+    */
+    Serial.println("--- GPS data ---");
+    Serial.print("Longitude = ");
+    Serial.print(gps_latitude, 6);
+    Serial.print(" | Latitude = ");
+    Serial.print(gps_longitude, 6);
+    Serial.print(" | Altitude = ");
+    Serial.print(gps_altitude);
+    Serial.print(" meters | Speed = ");
+    Serial.print(gps_speed);
+    Serial.print(" km/h | Time = ");
+    Serial.print(gps_hour);
+    Serial.print(":");
+    Serial.print(gps_minute);
+    Serial.print(":");
+    Serial.println(gps_second);
+    Serial.println("--- SCD30 data ---");
+    Serial.print("CO2 = ");
+    Serial.print(co2);
+    Serial.print(" | Temperature = ");
+    Serial.print(temp_scd30);
+    Serial.print(" | Humidity = ");
+    Serial.println(humidity_scd30);
+    Serial.println("--- SGP30 data ---");
+    Serial.print("eC02 = ");
+    Serial.print(eco2);
+    Serial.print(" | TVOC = ");
+    Serial.println(tvoc);
+    Serial.println("--- PMSA003I data ---");
+    Serial.print("PM10 STD = ");
+    Serial.print(pm10_std);
+    Serial.print(" | PM25 STD = ");
+    Serial.print(pm25_std);
+    Serial.print(" | PM100 STD = ");
+    Serial.print(pm100_std);
+    Serial.print(" | P03 = ");
+    Serial.print(p03);
+    Serial.print(" | P05 = ");
+    Serial.print(p05);
+    Serial.print(" | P10 = ");
+    Serial.print(p10);
+    Serial.print(" | P25 = ");
+    Serial.print(p25);
+    Serial.print(" | P50 = ");
+    Serial.print(p50);
+    Serial.print(" | P100 = ");
+    Serial.println(p100);
+    Serial.println("--- GY-91 data ---");
+    Serial.print("Temperature  = ");
+    Serial.print(temp_bmp);
+    Serial.print(" | Pressure = ");
+    Serial.print(pressure);
+    Serial.print(" | Altitude = ");
+    Serial.print(baro_altitude);
+    Serial.print(" | AccX  = ");
+    Serial.print(acc_x);
+    Serial.print(" | AccY = ");
+    Serial.print(acc_y);
+    Serial.print(" | AccZ = ");
+    Serial.print(acc_z);
+    Serial.print(" | GyroX  = ");
+    Serial.print(gyro_x);
+    Serial.print(" | GyroY = ");
+    Serial.print(gyro_y);
+    Serial.print(" | GyroZ = ");
+    Serial.print(gyro_z);
+    Serial.print(" | MagX  = ");
+    Serial.print(mag_x);
+    Serial.print(" | MagY= ");
+    Serial.print(mag_y);
+    Serial.print(" | MagZ = ");
+    Serial.print(mag_z);
+    Serial.print(" | TempMPU = ");
+    Serial.println(temp_imu);
+    Serial.println("--- Mics-2714 data ---");
+    Serial.print("NO2 = ");
+    Serial.println(no2_ppm);
+    Serial.println("--- Thermoresistor data ---");
+    Serial.print("Temperature = ");
+    Serial.println(temp_thermo);
+    Serial.println("--------------------------------------------");
 
     last_radio_transmit_millis = millis();
   }
