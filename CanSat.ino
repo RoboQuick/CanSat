@@ -51,8 +51,10 @@ File csvFile;
 // Name of created csv file
 String file_name;
 
+// String to write to csv file
 String csv_row;
 
+// Index of csv row
 int row_index = 1;
 
 // CSV file header
@@ -214,7 +216,7 @@ void begin_lora()
   // Settings for LoRa
   // THESE SETINGS MUST MACTH BASE STATION SETINGS
   LoRa.setTxPower(20);
-  LoRa.setSpreadingFactor(10);
+  LoRa.setSpreadingFactor(9);
   LoRa.setSignalBandwidth(125E3);
 
   // Except this one
@@ -262,7 +264,7 @@ void turn_on_all_sensors()
   
   // Begin communication with SCD30 sensor
   int tries = 0;
-  while (!scd.begin(Wire2) && tries != 5)
+  while (!scd.begin(Wire2) && tries < 5)
   {
     delay(1000);
     beep(500);
@@ -274,7 +276,7 @@ void turn_on_all_sensors()
   
   tries = 0;
   // Begin communication with PMSA003I sensor
-  while (!pms.begin_I2C(&Wire2) && tries != 5)
+  while (!pms.begin_I2C(&Wire2) && tries < 5)
   {
     delay(1000);
     beep(500);
@@ -286,7 +288,7 @@ void turn_on_all_sensors()
 
   tries = 0;
   // Begin communication with SGP30 sensor
-  while (!sgp.begin(&Wire2) && tries != 5)
+  while (!sgp.begin(&Wire2) && tries < 5)
   {
     delay(1000);
     beep(500);
@@ -309,7 +311,7 @@ void turn_on_all_sensors()
   beep(100);
   Serial.println("GPS working");
 
-  for(int i; i < 3; i++){
+  for(int i = 0; i < 3; i++){
     beep(50);
     delay(50);
   }
@@ -334,13 +336,7 @@ void create_sd_file()
   // Get last index of created csv file
   int current_index = 0;
   EEPROM.get(200, current_index);
-
-  // THIS CODE IS JUST FOR TESTING!!!
-  // IT WILL BE DELETED AFTER I HAVE CALIBRATED THE SENSORS
-  if (current_index == 255) {
-    EEPROM.put(200, 0);
-  }
-
+  
   // Increase index
   current_index += 1;
 
@@ -365,13 +361,19 @@ void begin_sd()
 {
   // See if the card is present and initialize it
   int tries = 0;
-  while (!SD.begin(BUILTIN_SDCARD) && tries != 5) {
+  while (!SD.begin(BUILTIN_SDCARD) && tries < 5) {
     Serial.println("Failed to find SD card! Check if SD card is present or if it has not come loose!");
     beep(500);
     delay(1000);
     tries += 1;
   }
-  Serial.println("SD card found");
+  if (tries >= 5){
+    Serial.println("SD card not found!!! Continuing without SD Card!!!");
+  }
+  else{
+    Serial.println("SD card found");
+  }
+
   beep(100);
   // Create a new csv file where to save data
   create_sd_file();
@@ -437,7 +439,7 @@ void read_gy91()
   if (imu.Read()) {
     acc_x = imu.accel_x_mps2() - 0.25;
     acc_y = imu.accel_y_mps2() + 0.25;
-    acc_z = imu.accel_z_mps2() - 0.1;
+    acc_z = imu.accel_z_mps2() - 0.3;
     gyro_x = imu.gyro_x_radps() - 0.02;
     gyro_y = imu.gyro_y_radps();
     gyro_z = imu.gyro_z_radps() + 0.01;
@@ -625,7 +627,7 @@ void loop()
     LoRa.beginPacket();
     LoRa.print(lora_string);
     LoRa.endPacket();
-
+    
     // Display all data in Serial monitor
     Serial.println("--- GPS data ---");
     Serial.print("Longitude = ");
@@ -720,7 +722,6 @@ void loop()
     Serial.print(temp_thermo);
     Serial.println(" °C");
     Serial.println("--------------------------------------------");
-
     last_radio_transmit_millis = millis();
   }
 
